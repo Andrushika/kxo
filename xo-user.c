@@ -14,6 +14,130 @@
 #define XO_DEVICE_FILE "/dev/kxo"
 #define XO_DEVICE_ATTR_FILE "/sys/class/kxo/kxo/kxo_state"
 
+#define MAX_GAMES 10
+
+typedef struct {
+    int pos;
+    char player;
+} move_t;
+
+/* Structure to store a complete game */
+typedef struct {
+    move_t moves[N_GRIDS];
+    int move_count;
+} game_t;
+
+/* Array to store history of multiple games */
+static game_t games[MAX_GAMES];
+static int game_count = 0;
+
+/* tracking current game */
+static move_t current_moves[N_GRIDS];
+static int move_count = 0;
+static char prev_board[N_GRIDS];
+
+static char empty_board[N_GRIDS];
+
+static void pos_to_coord(int pos, char *coord)
+{
+    coord[0] = 'A' + GET_COL(pos);
+    coord[1] = '1' + GET_ROW(pos);
+    coord[2] = '\0';
+}
+
+static int count_pieces(const char *board)
+{
+    int count = 0;
+    for (int i = 0; i < N_GRIDS; i++) {
+        if (board[i] != ' ')
+            count++;
+    }
+    return count;
+}
+
+static void save_current_game(void)
+{
+    if (game_count < MAX_GAMES) {
+        games[game_count].move_count = move_count;
+        memcpy(games[game_count].moves, current_moves,
+               sizeof(move_t) * move_count);
+        game_count++;
+    } else {
+        /* shift the games stroage, always keep latest MAX_GAMES data */
+        for (int i = 0; i < MAX_GAMES - 1; i++) {
+            games[i] = games[i + 1];
+        }
+
+        games[MAX_GAMES - 1].move_count = move_count;
+        memcpy(games[MAX_GAMES - 1].moves, current_moves,
+               sizeof(move_t) * move_count);
+    }
+}
+
+static void track_moves(const char *board)
+{
+    int curr_pieces = count_pieces(board);
+    int prev_pieces = count_pieces(prev_board);
+
+    if (curr_pieces < prev_pieces) {
+        if (move_count > 0) {
+            save_current_game();
+            move_count = 0;
+            for (int i = 0; i < N_GRIDS; i++) {
+                if (board[i] != ' ') {
+                    if (move_count < N_GRIDS) {
+                        current_moves[move_count].pos = i;
+                        current_moves[move_count].player = board[i];
+                        move_count++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Track new moves */
+    for (int i = 0; i < N_GRIDS; i++) {
+        if (board[i] != ' ' && prev_board[i] == ' ') {
+            if (move_count < N_GRIDS) {
+                current_moves[move_count].pos = i;
+                current_moves[move_count].player = board[i];
+                move_count++;
+            }
+        }
+    }
+
+    /* Update previous board state */
+    memcpy(prev_board, board, N_GRIDS);
+}
+static void display_move_history(void)
+{
+    if (move_count > 0) {
+        save_current_game();
+    }
+
+    printf("\nGame History (%d games):\n", game_count);
+    if (game_count == 0) {
+        printf("No games were recorded.\n");
+        return;
+    }
+
+    for (int g = 0; g < game_count; g++) {
+        printf("Game %d: ", g + 1);
+        printf("Moves: ");
+
+        for (int i = 0; i < games[g].move_count; i++) {
+            char coord[3];
+            pos_to_coord(games[g].moves[i].pos, coord);
+            printf("%c%s", games[g].moves[i].player, coord);
+            if (i < games[g].move_count - 1) {
+                printf(" -> ");
+            }
+        }
+        printf("\n");
+    }
+}
+
+
 /* Draw the board on the terminal */
 static int draw_board(const char *table)
 {
@@ -114,6 +238,9 @@ int main(int argc, char *argv[])
 
     char board_data[N_GRIDS];
 
+    memset(empty_board, ' ', N_GRIDS);
+    memset(prev_board, ' ', N_GRIDS);
+
     fd_set readset;
     int device_fd = open(XO_DEVICE_FILE, O_RDONLY);
     int max_fd = device_fd > STDIN_FILENO ? device_fd : STDIN_FILENO;
@@ -134,14 +261,18 @@ int main(int argc, char *argv[])
         if (FD_ISSET(STDIN_FILENO, &readset)) {
             FD_CLR(STDIN_FILENO, &readset);
             listen_keyboard_handler();
-        } else if (read_attr && FD_ISSET(device_fd, &readset)) {
+        } else if (FD_ISSET(device_fd, &readset)) {
             FD_CLR(device_fd, &readset);
             printf("\033[H\033[J"); /* ASCII escape code to clear the screen */
 
             read(device_fd, board_data, N_GRIDS);
-            draw_board(board_data);
+            track_moves(board_data);
+            if (read_attr)
+                draw_board(board_data);
         }
     }
+
+    display_move_history();
 
     raw_mode_disable();
     fcntl(STDIN_FILENO, F_SETFL, flags);
